@@ -1,37 +1,70 @@
-# DESIGN
-
-> Copy this file to `DESIGN.md` and answer it **before you write code**. Revise it as you
-> learn, but keep the first version in git history. A stranger grades it (`G-DESIGN`), so
-> write for someone who has never seen your code. The five headings are fixed; keep them.
-
+Copy this file to DESIGN.md and answer it before you write code. Revise it as you learn, but keep the first version in git history. A stranger grades it (G-DESIGN), so write for someone who has never seen your code. The five headings are fixed; keep them.
 ## Components
 
-What are the moving parts, and which of them are separate processes? Name each one and its
-port. Why are the Judge and Masker separate services while the Guardrail runs in-process?
-Answer in your own words, not SPEC's.
-
+What are the moving parts, and which of them are separate processes? Name each one and its port. Why are the Judge and Masker separate services while the Guardrail runs in-process? Answer in your own words, not SPEC's.
+Moving Parts: CLI, Pipeline, ADK LLM Agent, Sanitizer, Security Judge, Guardrail, Masker, Postgres SQL, MCP Tollbox Server, Arize Phoenix, Eval Runner, Mem0.
+In the same process: CLI, Pipeline, Sanitizer, and Guardrail. Separate processes: Postgres on 5433, MCP Toolbox Server on 5100, Security Judge on 10002, Masker on 10003, and Arize Phoenix on 6006. The web server runs on 8000.
+Judge checks if an input is hostile while Masker checks data leakage. They are separate services because they take care of different things.
+The Guardrail runs in-process because it decides whether the message belongs to this store's support scope, and keeping that check local makes the evaluation fast.
 ## Responsibilities
 
-Which component decides that a customer may only see their own orders, and where exactly is
-that line of code or SQL? Which component may hold an API key? Which one decides a turn is
-over budget? For every rule in SPEC §11, say whether it is enforced **in code**, **in a
-prompt**, or **both**, and why. This table is the core of `G-ENFORCE`.
-
+Which component decides that a customer may only see their own orders, and where exactly is that line of code or SQL? Which component may hold an API key? Which one decides a turn is over budget? For every rule in SPEC §11, say whether it is enforced in code, in a prompt, or both, and why. This table is the core of G-ENFORCE.
+See their own orders: MCP Toolbox Server and Session Initialization Code.
+Line: In tools.yaml, WHERE order_id = $1 AND customer_email = $2
+Hold an API key: The Local Backend System Environment
+Decides a turn is over budget: Pipeline Module
+R-1: Code. Enforced via SQL, including the session customer's e-mail in the query.
+R-2: Code. Every turn is handled as one step of the pipeline.
+R-3: Code. The agent is not given a tool that can alter an order.
+R-4: Code. The pipeline emits an error when a guard fails.
+R-5: Code. Only the customer's message is saved.
+R-6: Prompt. It's the Guardrail's scope prompt.
+R-7: Code. Discard memories that are too long.
+R-8: Code. The Masker changes only PII; it does not alter non-PII content.
+R-9: Code. The pipeline uses the explicit verdict returned by the security check.
+R-10: Code/configuration. Arize Phoenix runs as its own process.
+R-11: Code. PostgreSQL enforces a CHECK constraint on action_type.
 ## Communication
 
-How does a message travel from the CLI or browser to the database and back? Name each hop's
-protocol (function call, MCP, A2A JSON-RPC, HTTP, NDJSON). Which A2A method did you
-implement, and what does a verdict look like on the wire?
-
+How does a message travel from the CLI or browser to the database and back? Name each hop's protocol (function call, MCP, A2A JSON-RPC, HTTP, NDJSON). Which A2A method did you implement, and what does a verdict look like on the wire?
+1. Client Submission to Pipeline:
+- Browser --> Web Server (support/web.py): HTTP POST (/api/chat carrying a JSON body).
+- CLI --> Pipeline (support/pipeline.py): In-Process Function Call (invoking run_pipeline(...) async generator).
+2. Sanitizer Verification:
+- Pipeline --> Sanitizer (guards/sanitizer.py): In-Process Function Call (standard Python regex/string cleaning).
+3. Threat Analysis (Judge Service):
+- Pipeline --> Security Judge (:10002): A2A JSON-RPC over HTTP (POST request carrying JSON-RPC payload to evaluate injection risk).
+4. Domain Scope Verification (Guardrail):
+- Pipeline --> Guardrail Agent: In-Process Function Call (executing the local ADK LlmAgent session runner).
+5. Memory Retrieval:
+- Pipeline --> Mem0 Cloud API: HTTPS REST API (queries vector storage for past context scores).
+6. Agent Processing & Tool Execution:
+- Pipeline --> Google Gemini API: HTTPS REST API (via google-adk runner).
+- Gemini Agent --> MCP Toolbox Server (:5100): MCP over HTTP (POST to /api/tool/get-order-status/invoke with bound session parameters).
+7. Database Querying & Return:
+- MCP Toolbox --> PostgreSQL (:5433): PostgreSQL Native Wire Protocol (TCP socket parameterized query execution).
+- PostgreSQL --> MCP Toolbox: Native SQL record tuple response.
+- MCP Toolbox --> Agent/Pipeline: HTTP JSON Response returning nested JSON strings: {"result": "{\"order_id\": 3, ...}"}.
+8. Response Masking & Persistence:
+- Pipeline --> Masker Service (:10003): A2A JSON-RPC over HTTP (submits model reply to redact PII).
+- Pipeline --> Mem0 Cloud API: HTTPS REST API (persists safe user query to long-term memory).
+9. Response Delivery to User:
+- Pipeline --> Web Browser: NDJSON over HTTP (StreamingResponse emitting line-delimited application/x-ndjson events in real time).
+- Pipeline --> CLI: In-Process Async Generator Yield / Console Print.
+The system implements only the message/send method of the standard Agent-to-Agent (A2A) protocol over JSON-RPC 2.0.
+The verdict on the wire is {"verdict":"allow"|"block","reason":"..."}.
 ## State
 
-What is stored, where, and for how long: sessions, memories, traces, run logs, the action
-log? Which of them contain customer data, and who can read each one? What happens to
-memory when a customer's order changes after the memory was saved?
-
+What is stored, where, and for how long: sessions, memories, traces, run logs, the action log? Which of them contain customer data, and who can read each one? What happens to memory when a customer's order changes after the memory was saved?
+Sessions: Stored in memory by ADK's InMemorySessionService. Stores active user's conversation history and bound session parameter. When the application process terminates, the session state is destroyed.
+Memories: Extracted from user queries and sent to Mem0 Cloud. Will persist indefinitely unless explicitly cleared via Mem0 API.
+Traces: Posted to Arize Phoenix, recording every step. Includes full user inputs, model outputs, etc. Stays even when process ends.
+Run logs: Capture events, and written to disk. No user data.
+Action log: PostgreSQL table. Enforce data integrity via SQL constraints.
+When an order status changes, the Mem0 vector memory stays untouched.
+System instructions explicitly require the agent to fetch order information solely via MCP tools, and live tool outputs returned from PostgreSQL override any conflicting textual context retried from memory.
 ## Trade-offs
 
-What did each guard cost you in latency (from your traces), and was it worth it? Did you
-make the Guardrail fail closed, and what does that cost when Gemini is slow? If you changed
-`T-MEM-MINSCORE` or argued against any threshold, give the evidence here, and keep the
-original gate in your report.
+What did each guard cost you in latency (from your traces), and was it worth it? Did you make the Guardrail fail closed, and what does that cost when Gemini is slow? If you changed T-MEM-MINSCORE or argued against any threshold, give the evidence here, and keep the original gate in your report.
+The code cutoff is T-MEM-MINSCORE = 0.15.
+X01 took 6 ms in this round. The reports/eval.json file does not support the earlier 80-150 ms Security Judge range or the 400-750 ms Masker range, so those figures are not claimed here.
