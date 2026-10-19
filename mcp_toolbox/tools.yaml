@@ -1,0 +1,100 @@
+sources:
+  support-db:
+    kind: postgres
+    host: 127.0.0.1
+    port: 5433
+    database: support
+    user: support_toolbox
+    password: ${TOOLBOX_DB_PASSWORD}
+
+tools:
+  get-order-status:
+    kind: postgres-sql
+    source: support-db
+    description: >
+      Look up one order that belongs to the logged-in customer. Returns status, items,
+      date, total and delivery address. Returns nothing when the order does not exist
+      or belongs to someone else.
+    parameters:
+      - name: order_id
+        type: integer
+        description: The order number the customer asked about.
+      - name: customer_email
+        type: string
+        description: The logged-in customer's email. Bound by the application; the model cannot set it.
+    statement: |
+      SELECT order_id, customer_email, status, items, order_date, total_amount, delivery_address
+      FROM customer_orders
+      WHERE order_id = $1 AND customer_email = $2;
+
+  find-customer-orders:
+    kind: postgres-sql
+    source: support-db
+    description: >
+      List every order that belongs to the logged-in customer, newest first.
+    parameters:
+      - name: customer_email
+        type: string
+        description: The logged-in customer's email. Bound by the application; the model cannot set it.
+    statement: |
+      SELECT order_id, customer_email, status, items, order_date, total_amount, delivery_address
+      FROM customer_orders
+      WHERE customer_email = $1
+      ORDER BY order_date DESC;
+
+  action-log:
+    kind: postgres-sql
+    source: support-db
+    description: >
+      Record a request for a person to act on later. This does not change any order.
+      action_type must be exactly one of CANCEL_ORDER, RETURN_ORDER, UPDATE_ADDRESS,
+      UPDATE_PREFERENCE, UPDATE_PROFILE. Returns nothing when parameters name an order
+      the customer does not own.
+    parameters:
+      - name: user_email
+        type: string
+        description: The logged-in customer's email. Bound by the application; the model cannot set it.
+      - name: action_type
+        type: string
+        description: >
+          Exactly one of CANCEL_ORDER, RETURN_ORDER, UPDATE_ADDRESS, UPDATE_PREFERENCE,
+          UPDATE_PROFILE.
+      - name: parameters
+        type: string
+        description: >
+          A JSON object string. Include order_id when the request is about one order,
+          for example {"order_id": 4, "reason": "changed my mind"}.
+    statement: |
+      INSERT INTO actions_log (user_email, action_type, parameters)
+      SELECT $1::text, $2::text, $3::text::jsonb
+      WHERE ($3::text::jsonb ->> 'order_id') IS NULL
+         OR EXISTS (
+           SELECT 1 FROM customer_orders
+           WHERE order_id = ($3::text::jsonb ->> 'order_id')::int
+             AND customer_email = $1::text
+         )
+      RETURNING id, action_type;
+
+  verify-login:
+    kind: postgres-sql
+    source: support-db
+    description: Check a customer's email and password. Returns their profile, or nothing.
+    parameters:
+      - name: email
+        type: string
+        description: The email the customer typed.
+      - name: password
+        type: string
+        description: The password the customer typed.
+    statement: |
+      SELECT email, full_name, is_premium_customer
+      FROM users
+      WHERE email = $1 AND password = $2;
+
+toolsets:
+  support-agent:
+    - get-order-status
+    - find-customer-orders
+    - action-log
+  auth:
+    - verify-login

@@ -1,0 +1,17 @@
+.env
+.venv/
+.python-version
+.run/
+.phoenix/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+runs/*
+!runs/failing/
+!runs/failing/**
+reports/*
+!reports/eval.json

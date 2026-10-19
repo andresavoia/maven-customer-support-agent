@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shop support</title>
+  <style>
+    :root {
+      --ink: #1c1915;
+      --paper: #f4efe6;
+      --rail: #1f2a24;
+      --rail-ink: #e7efe8;
+      --line: #d9d0c3;
+      --accent: #0f6e56;
+      --warn: #8a3b12;
+      --ok: #1f6b3a;
+      --card: #fffdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.45 "Iowan Old Style", Palatino, Georgia, serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+    }
+    header h1 { font-size: 22px; margin: 0; font-weight: 600; }
+    header p { margin: 0; color: #5c564c; }
+    main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: calc(100vh - 64px); }
+    #desk { display: flex; flex-direction: column; padding: 20px 24px 16px; }
+    #log { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+    .bubble { max-width: 42rem; padding: 10px 14px; background: var(--card); border: 1px solid var(--line); }
+    .bubble.user { align-self: flex-end; background: #e7f2ec; }
+    form.composer { display: flex; gap: 8px; margin-top: 12px; }
+    input, button { font: inherit; }
+    input[type="email"], input[type="password"], textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      background: white;
+      color: var(--ink);
+    }
+    textarea { min-height: 72px; resize: vertical; }
+    button {
+      background: var(--accent);
+      color: white;
+      border: 0;
+      padding: 10px 16px;
+      cursor: pointer;
+    }
+    button.quiet { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    #gate { max-width: 28rem; margin: 48px auto; }
+    #rail {
+      background: var(--rail);
+      color: var(--rail-ink);
+      padding: 16px;
+      overflow: auto;
+      font: 13px/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+    }
+    #rail h2 { font: 600 14px/1.2 Georgia, serif; margin: 0 0 12px; letter-spacing: 0.04em; }
+    .step { border-top: 1px solid #345044; padding: 8px 0; }
+    .step b { color: #b7e2c8; }
+    .blocked { color: #f0b429; }
+    .error { color: #ffb4a2; }
+    table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+    td, th { border-bottom: 1px solid #345044; text-align: left; padding: 3px 4px; vertical-align: top; }
+    a { color: #9ad7ff; }
+    .sql { white-space: pre-wrap; color: #d5e8da; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Shop support</h1>
+    <p id="who">Not signed in</p>
+  </header>
+  <main>
+    <section id="desk">
+      <form id="gate">
+        <label>Email <input id="email" type="email" autocomplete="username" required /></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password" required /></label>
+        <p><button type="submit">Sign in</button></p>
+        <p id="gate-error"></p>
+      </form>
+      <div id="log" hidden></div>
+      <form id="composer" class="composer" hidden>
+        <textarea id="message" placeholder="Ask about your order"></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </section>
+    <aside id="rail">
+      <h2>This turn</h2>
+      <div id="steps">Sign in to see each step as it happens.</div>
+    </aside>
+  </main>
+  <script>
+    const gate = document.querySelector("#gate");
+    const log = document.querySelector("#log");
+    const composer = document.querySelector("#composer");
+    const steps = document.querySelector("#steps");
+    const who = document.querySelector("#who");
+    let userId = "";
+
+    gate.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: document.querySelector("#email").value,
+          password: document.querySelector("#password").value,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        document.querySelector("#gate-error").textContent = body.error || "Login failed";
+        return;
+      }
+      userId = body.user_id;
+      who.textContent = body.full_name;
+      gate.hidden = true;
+      log.hidden = false;
+      composer.hidden = false;
+      steps.textContent = "Send a message.";
+    });
+
+    composer.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = document.querySelector("#message").value.trim();
+      if (!message) return;
+      document.querySelector("#message").value = "";
+      addBubble(message, "user");
+      steps.innerHTML = "";
+      const reply = document.createElement("div");
+      reply.className = "bubble";
+      reply.textContent = "…";
+      log.append(reply);
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ user_id: userId, message }),
+      });
+      if (!response.ok || !response.body) {
+        const body = await response.json().catch(() => ({}));
+        reply.textContent = body.error || "The request failed.";
+        return;
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          renderEvent(JSON.parse(line), reply);
+        }
+      }
+    });
+
+    function addBubble(text, role) {
+      const node = document.createElement("div");
+      node.className = "bubble " + (role || "");
+      node.textContent = text;
+      log.append(node);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function renderEvent(event, reply) {
+      if (event.type === "final") {
+        reply.textContent = event.response || "";
+        addStep(event.blocked ? "blocked" : "final", event.response || "", event.blocked ? "blocked" : "");
+        return;
+      }
+      if (event.type === "error") {
+        reply.textContent = event.error || "The request could not be checked.";
+        addStep("error", event.error || "", "error");
+        return;
+      }
+      if (event.type === "trace") {
+        const link = document.createElement("div");
+        link.className = "step";
+        link.innerHTML = `<a href="${event.url}" target="_blank" rel="noreferrer">Open trace</a>`;
+        steps.append(link);
+        return;
+      }
+      if (event.type === "step") {
+        const cls = event.status === "blocked" ? "blocked" : "";
+        addStep(event.key, `${event.status} · ${event.ms} ms · ${event.span}<br>${escapeHtml(event.detail || "")}`, cls);
+        if (event.memories) {
+          const list = event.memories.map((item) =>
+            `${item.score.toFixed(2)} ${item.inserted ? "kept" : "skipped"} — ${escapeHtml(item.memory)}`
+          ).join("<br>");
+          addStep("recall list", list, "");
+        }
+        return;
+      }
+      if (event.type === "tool_call") {
+        const info = event.info || {};
+        const sql = fillSql(info.statement || "", info.params || [], event.args || {}, info.bound || []);
+        addStep(event.name, `<span class="sql">${escapeHtml(sql)}</span>`, "");
+        return;
+      }
+      if (event.type === "tool_result") {
+        addStep(event.name + " result", tableFor(event.result), "");
+        return;
+      }
+      if (event.type === "llm") {
+        addStep("llm", `${escapeHtml(event.decision)} · ${event.ms} ms`, "");
+      }
+    }
+
+    function addStep(title, html, cls) {
+      const node = document.createElement("div");
+      node.className = "step " + cls;
+      node.innerHTML = `<b>${escapeHtml(title)}</b><div>${html}</div>`;
+      steps.append(node);
+      steps.parentElement.scrollTop = steps.parentElement.scrollHeight;
+    }
+
+    function fillSql(statement, params, args, bound) {
+      let sql = statement;
+      params.forEach((name, index) => {
+        const value = bound.includes(name) ? `bound:${name}` : JSON.stringify(args[name]);
+        sql = sql.replaceAll("$" + (index + 1), value);
+      });
+      return sql;
+    }
+
+    function tableFor(result) {
+      const rows = Array.isArray(result) ? result : result && typeof result === "object" ? [result] : null;
+      if (!rows || !rows.length || typeof rows[0] !== "object") {
+        return escapeHtml(JSON.stringify(result));
+      }
+      const keys = Object.keys(rows[0]);
+      const head = "<tr>" + keys.map((key) => `<th>${escapeHtml(key)}</th>`).join("") + "</tr>";
+      const body = rows.map((row) => "<tr>" + keys.map((key) => `<td>${escapeHtml(formatCell(row[key]))}</td>`).join("") + "</tr>").join("");
+      return `<table>${head}${body}</table>`;
+    }
+
+    function formatCell(value) {
+      if (value && typeof value === "object") return JSON.stringify(value);
+      return value == null ? "" : String(value);
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[char]));
+    }
+  </script>
+</body>
+</html>

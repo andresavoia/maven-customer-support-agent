@@ -1,0 +1,28 @@
+[project]
+name = "customer-support-agent"
+version = "0.1.0"
+description = "Shop support desk: one pipeline, MCP tools, A2A guards, memory and traces."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "google-adk>=2.12",
+  "litellm>=1.70",
+  "toolbox-core>=1.4",
+  "mem0ai>=2.2",
+  "fastapi>=0.115",
+  "uvicorn>=0.34",
+  "httpx>=0.28",
+  "python-dotenv>=1.0",
+  "arize-phoenix>=20.0",
+  "openinference-instrumentation-google-genai",
+  "openinference-semantic-conventions",
+  "opentelemetry-sdk",
+  "opentelemetry-exporter-otlp-proto-http",
+  "pyyaml",
+]
+
+[tool.setuptools.packages.find]
+include = ["support*", "guards*", "eval*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
